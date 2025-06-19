@@ -19,10 +19,10 @@ import (
 
 	"v2ray.com/core"
 
+	app_policy "v2ray.com/core/app/policy"
 	"v2ray.com/core/common/buf"
 	"v2ray.com/core/common/net"
 	"v2ray.com/core/common/session"
-	"v2ray.com/core/features/policy"
 	"v2ray.com/core/proxy/socks"
 	v_transport "v2ray.com/core/transport"
 )
@@ -34,11 +34,21 @@ func ServerType() interface{} {
 func startSocks5ListenerWithHandler(httpHandler http.Handler) error {
 
 	serverConfig := socks.ServerConfig{
-		AuthType: socks.AuthType_NO_AUTH,
+		AuthType:  socks.AuthType_NO_AUTH,
+		UserLevel: 1,
 	}
-	dummyManager := policy.DefaultManager{}
+	debugTimeouts := &app_policy.Policy_Timeout{
+		Handshake:      &app_policy.Second{Value: 199},
+		ConnectionIdle: &app_policy.Second{Value: 19},
+		UplinkOnly:     &app_policy.Second{Value: 18},
+		DownlinkOnly:   &app_policy.Second{Value: 17},
+	}
+	debugAppPolicyConfig := &app_policy.Policy{Timeout: debugTimeouts}
+	debugPolicyLevel := map[uint32]*app_policy.Policy{1: debugAppPolicyConfig}
+	policyConfig := &app_policy.Config{Level: debugPolicyLevel}
+	dummyManager, _ := app_policy.New(context.TODO(), policyConfig)
 	dummyV := core.Instance{}
-	dummyV.AddFeature(&dummyManager)
+	dummyV.AddFeature(dummyManager)
 	tmp, err := core.CreateObject(&dummyV, &serverConfig)
 	if err != nil {
 		return err
