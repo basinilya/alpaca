@@ -147,9 +147,22 @@ func (d *AlpacaVDispatcher) Dispatch(ctx context.Context, dest net.Destination) 
 		return nil, fmt.Errorf("failed to connect to upstream proxy")
 	}
 
+	// The Writer returned by Dispatch() is expected to implement Close().
+	// After one request the upstream server is likely to keep the connection open.
+	// Close() helps to detect the disconnected downstream
+	linkReader := struct {
+		io.ReadCloser
+		buf.Reader
+	}{ReadCloser: resPipeRd, Reader: buf.NewReader(resPipeRd)}
+
+	linkWriter := struct {
+		io.WriteCloser
+		buf.Writer
+	}{WriteCloser: reqPipeWr, Writer: buf.NewWriter(reqPipeWr)}
+
 	link := &v_transport.Link{
-		Reader: buf.NewReader(resPipeRd), // response
-		Writer: buf.NewWriter(reqPipeWr), // request
+		Reader: linkReader, // response
+		Writer: linkWriter, // request
 	}
 
 	return link, nil

@@ -131,8 +131,14 @@ func (ph ProxyHandler) handleConnect(w http.ResponseWriter, req *http.Request) {
 	// will close the Reader for the other goroutine, forcing any blocked copy to unblock. This
 	// prevents any goroutine from blocking indefinitely (which will leak a file descriptor).
 	closeInDefer = false
-	go func() { _, _ = io.Copy(server, client); server.Close() }()
-	go func() { _, _ = io.Copy(client, server); client.Close() }()
+	go func() {
+		_, _ = io.Copy(server, client)
+		server.Close()
+	}()
+	go func() {
+		_, _ = io.Copy(client, server)
+		client.Close()
+	}()
 }
 
 func connectDirect(req *http.Request) (net.Conn, error) {
