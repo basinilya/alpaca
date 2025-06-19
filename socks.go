@@ -39,9 +39,9 @@ func startSocks5ListenerWithHandler(httpHandler http.Handler) error {
 	}
 	debugTimeouts := &app_policy.Policy_Timeout{
 		Handshake:      &app_policy.Second{Value: 199},
-		ConnectionIdle: &app_policy.Second{Value: 19},
-		UplinkOnly:     &app_policy.Second{Value: 18},
-		DownlinkOnly:   &app_policy.Second{Value: 17},
+		ConnectionIdle: &app_policy.Second{Value: 119},
+		UplinkOnly:     &app_policy.Second{Value: 118},
+		DownlinkOnly:   &app_policy.Second{Value: 117},
 	}
 	debugAppPolicyConfig := &app_policy.Policy{Timeout: debugTimeouts}
 	debugPolicyLevel := map[uint32]*app_policy.Policy{1: debugAppPolicyConfig}
@@ -178,7 +178,7 @@ type loggingPipeReader struct {
 }
 
 func (r *loggingPipeReader) Close() error {
-	log.Printf("PipeReader %s closed", r.id)
+	log.Printf("PipeReader %s closing", r.id)
 	return r.ReadCloser.Close()
 }
 
@@ -188,7 +188,7 @@ type loggingPipeWriter struct {
 }
 
 func (w *loggingPipeWriter) Close() error {
-	log.Printf("PipeWriter %s closed", w.id)
+	log.Printf("PipeWriter %s closing", w.id)
 	return w.WriteCloser.Close()
 }
 
@@ -226,102 +226,107 @@ func NewHTTPFilteringConn(reqPipeRd io.ReadCloser, resPipeWr io.WriteCloser) *HT
 	}
 }
 
-func (d *HTTPFilteringConn) WaitReady(ctx context.Context) (bool, error) {
+func (c *HTTPFilteringConn) WaitReady(ctx context.Context) (bool, error) {
 	select {
 	case <-ctx.Done():
 		return false, ctx.Err()
-	case <-d.readyCh:
-		return d.statusOK, d.headerErr
+	case <-c.readyCh:
+		return c.statusOK, c.headerErr
 	}
 }
 
-func (d *HTTPFilteringConn) Write(b []byte) (int, error) {
-	if d.headerDone {
-		if !d.statusOK {
+func (c *HTTPFilteringConn) Write(b []byte) (int, error) {
+	if c.headerDone {
+		if !c.statusOK {
 			return len(b), nil // Discard
 		}
-		return d.resPipeWr.Write(b)
+		return c.resPipeWr.Write(b)
 	}
 
-	_, err := d.headerBuf.Write(b)
+	_, err := c.headerBuf.Write(b)
 	if err != nil {
-		d.markReady(false, err)
+		c.markReady(false, err)
 		return 0, err
 	}
 
-	bufReader := bufio.NewReader(&d.headerBuf)
+	bufReader := bufio.NewReader(&c.headerBuf)
 	resp, err := http.ReadResponse(bufReader, nil)
 	if err != nil {
 		if errors.Is(err, io.EOF) {
 			return len(b), nil // Not enough data yet
 		}
-		d.markReady(false, fmt.Errorf("failed to parse HTTP response: %w", err))
+		c.markReady(false, fmt.Errorf("failed to parse HTTP response: %w", err))
 		return 0, err
 	}
 
 	ok := resp.StatusCode == http.StatusOK
 	rest, err := io.ReadAll(bufReader)
 	if err != nil {
-		d.markReady(false, fmt.Errorf("reading body after header failed: %w", err))
+		c.markReady(false, fmt.Errorf("reading body after header failed: %w", err))
 		return 0, err
 	}
 
-	d.markReady(ok, nil)
+	c.markReady(ok, nil)
 
 	if ok {
-		_, err = d.resPipeWr.Write(rest)
+		_, err = c.resPipeWr.Write(rest)
 		if err != nil {
 			return 0, err
 		}
 	}
 
-	d.headerBuf.Reset()
+	c.headerBuf.Reset()
 	return len(b), nil
 }
 
-func (d *HTTPFilteringConn) markReady(ok bool, err error) {
-	if !d.headerDone {
-		d.headerDone = true
-		d.statusOK = ok
-		d.headerErr = err
-		close(d.readyCh)
+func (c *HTTPFilteringConn) markReady(ok bool, err error) {
+	if !c.headerDone {
+		c.headerDone = true
+		c.statusOK = ok
+		c.headerErr = err
+		close(c.readyCh)
 	}
 }
 
 // Close implements net.Conn.
-func (d *HTTPFilteringConn) Close() error {
-	d.reqPipeRd.Close()
-	d.resPipeWr.Close()
+func (c *HTTPFilteringConn) Close() error {
+	log.Printf("Closing HTTPFilteringConn")
+	c.reqPipeRd.Close()
+	c.resPipeWr.Close()
 	return nil
 }
 
+func (c *HTTPFilteringConn) CloseWrite() error {
+	return c.resPipeWr.Close()
+}
+
 // Read implements net.Conn.
-func (d *HTTPFilteringConn) Read(b []byte) (n int, err error) {
-	return d.reqPipeRd.Read(b)
+func (c *HTTPFilteringConn) Read(b []byte) (n int, err error) {
+	return c.reqPipeRd.Read(b)
 }
 
 // LocalAddr implements net.Conn.
-func (d *HTTPFilteringConn) LocalAddr() go_net.Addr {
+func (c *HTTPFilteringConn) LocalAddr() go_net.Addr {
 	panic("unimplemented")
 }
 
 // RemoteAddr implements net.Conn.
-func (d *HTTPFilteringConn) RemoteAddr() go_net.Addr {
+func (c *HTTPFilteringConn) RemoteAddr() go_net.Addr {
 	panic("unimplemented")
 }
 
 // SetDeadline implements net.Conn.
-func (d *HTTPFilteringConn) SetDeadline(t time.Time) error {
+func (c *HTTPFilteringConn) SetDeadline(t time.Time) error {
 	panic("unimplemented")
 }
 
 // SetReadDeadline implements net.Conn.
-func (d *HTTPFilteringConn) SetReadDeadline(t time.Time) error {
+func (c *HTTPFilteringConn) SetReadDeadline(t time.Time) error {
 	panic("unimplemented")
 }
 
 // SetWriteDeadline implements net.Conn.
-func (d *HTTPFilteringConn) SetWriteDeadline(t time.Time) error {
+func (c *HTTPFilteringConn) SetWriteDeadline(t time.Time) error {
 	panic("unimplemented")
 }
 

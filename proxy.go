@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 )
 
 var tlsClientConfig *tls.Config
@@ -131,14 +132,31 @@ func (ph ProxyHandler) handleConnect(w http.ResponseWriter, req *http.Request) {
 	// will close the Reader for the other goroutine, forcing any blocked copy to unblock. This
 	// prevents any goroutine from blocking indefinitely (which will leak a file descriptor).
 	closeInDefer = false
-	go func() {
-		_, _ = io.Copy(server, client)
-		server.Close()
-	}()
-	go func() {
-		_, _ = io.Copy(client, server)
-		client.Close()
-	}()
+	var ops atomic.Int32
+	copyFunc := func(dst io.Writer, src io.Reader, description string) {
+		closeInDefer2 := true
+		defer func() {
+			if ops.Add(1) >= 2 || closeInDefer2 {
+				defer client.Close()
+				server.Close()
+			}
+		}()
+		_, err2 := io.Copy(dst, src)
+		log.Printf("[%d] %s Copy ended with: %v", id, description, err2)
+		if err2 == nil {
+			tcpConn, b := dst.(HasCloseWrite)
+			if b {
+				closeInDefer2 = false
+				tcpConn.CloseWrite()
+			}
+		}
+	}
+	go copyFunc(server, client, "upload")
+	go copyFunc(client, server, "download")
+}
+
+type HasCloseWrite interface {
+	CloseWrite() error
 }
 
 func connectDirect(req *http.Request) (net.Conn, error) {
