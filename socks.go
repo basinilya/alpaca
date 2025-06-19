@@ -17,8 +17,12 @@ import (
 
 	"strconv"
 
+	"v2ray.com/core"
+
 	"v2ray.com/core/common/buf"
 	"v2ray.com/core/common/net"
+	"v2ray.com/core/common/session"
+	"v2ray.com/core/features/policy"
 	"v2ray.com/core/proxy/socks"
 	v_transport "v2ray.com/core/transport"
 )
@@ -28,6 +32,18 @@ func ServerType() interface{} {
 }
 
 func startSocks5ListenerWithHandler(httpHandler http.Handler) error {
+
+	serverConfig := socks.ServerConfig{
+		AuthType: socks.AuthType_NO_AUTH,
+	}
+	dummyManager := policy.DefaultManager{}
+	dummyV := core.Instance{}
+	dummyV.AddFeature(&dummyManager)
+	tmp, err := core.CreateObject(&dummyV, &serverConfig)
+	if err != nil {
+		return err
+	}
+	socksServer := tmp.(*socks.Server)
 
 	ln, err := net.Listen("tcp", ":1080")
 	if err != nil {
@@ -42,7 +58,7 @@ func startSocks5ListenerWithHandler(httpHandler http.Handler) error {
 			}
 			// Pass conn to SOCKS5 protocol handler
 			go func() {
-				handleV2RaySocksConn(conn, httpHandler)
+				handleV2RaySocksConn(conn, httpHandler, socksServer)
 			}()
 		}
 	}()
@@ -50,16 +66,17 @@ func startSocks5ListenerWithHandler(httpHandler http.Handler) error {
 	return nil
 }
 
-func handleV2RaySocksConn(conn net.Conn, handler http.Handler) {
+type key int
+
+const v2raykey key = 1
+
+func handleV2RaySocksConn(conn net.Conn, handler http.Handler, socksServer *socks.Server) {
+	var err error
+	defer conn.Close()
 	ctx := context.Background()
-	serverConfig := socks.ServerConfig{
-		AuthType: socks.AuthType_NO_AUTH,
-	}
-	socksServer, err := socks.NewServer(ctx, &serverConfig)
-	if err != nil {
-		log.Printf("socks.NewServer failed: %v", err)
-		return
-	}
+	ctx = session.ContextWithInbound(ctx, &session.Inbound{
+		Gateway: net.TCPDestination(net.AnyIP, 0),
+	})
 
 	dispatcher := &AlpacaVDispatcher{handler}
 
