@@ -76,10 +76,6 @@ func startSocks5ListenerWithHandler(httpHandler http.Handler) error {
 	return nil
 }
 
-type key int
-
-const v2raykey key = 1
-
 func handleV2RaySocksConn(conn net.Conn, handler http.Handler, socksServer *socks.Server) {
 	var err error
 	defer conn.Close()
@@ -123,8 +119,16 @@ func (d *AlpacaVDispatcher) Dispatch(ctx context.Context, dest net.Destination) 
 	}
 	fakeReq = fakeReq.WithContext(ctx)
 
-	reqPipeRd, reqPipeWr := io.Pipe()
-	resPipeRd, resPipeWr := io.Pipe()
+	var reqPipeRd io.ReadCloser
+	var reqPipeWr io.WriteCloser
+	var resPipeRd io.ReadCloser
+	var resPipeWr io.WriteCloser
+
+	reqPipeRd, reqPipeWr = io.Pipe()
+	resPipeRd, resPipeWr = io.Pipe()
+
+	reqPipeRd, reqPipeWr = LoggingPipeWrap("req", reqPipeRd, reqPipeWr)
+	resPipeRd, resPipeWr = LoggingPipeWrap("res", resPipeRd, resPipeWr)
 
 	conn := NewHTTPFilteringConn(reqPipeRd, resPipeWr)
 	rw := &dummyResponseWriter{req: fakeReq, conn: conn}
@@ -151,8 +155,33 @@ func (d *AlpacaVDispatcher) Dispatch(ctx context.Context, dest net.Destination) 
 	return link, nil
 }
 
+func LoggingPipeWrap(id string, r io.ReadCloser, w io.WriteCloser) (io.ReadCloser, io.WriteCloser) {
+	return &loggingPipeReader{ReadCloser: r, id: id}, &loggingPipeWriter{WriteCloser: w, id: id}
+}
+
+type loggingPipeReader struct {
+	io.ReadCloser
+	id string // optional: tag for logging
+}
+
+func (r *loggingPipeReader) Close() error {
+	log.Printf("PipeReader %s closed", r.id)
+	return r.ReadCloser.Close()
+}
+
+type loggingPipeWriter struct {
+	io.WriteCloser
+	id string
+}
+
+func (w *loggingPipeWriter) Close() error {
+	log.Printf("PipeWriter %s closed", w.id)
+	return w.WriteCloser.Close()
+}
+
 func (d *AlpacaVDispatcher) Close() error {
 	// no-op
+	log.Printf("Closing Dispatcher")
 	return nil
 }
 
@@ -165,8 +194,8 @@ func (d *AlpacaVDispatcher) Type() interface{} {
 }
 
 type HTTPFilteringConn struct {
-	reqPipeRd *io.PipeReader
-	resPipeWr *io.PipeWriter
+	reqPipeRd io.ReadCloser
+	resPipeWr io.WriteCloser
 
 	headerBuf  bytes.Buffer
 	headerDone bool
@@ -176,7 +205,7 @@ type HTTPFilteringConn struct {
 	readyCh chan struct{} // closed when headerDone is set
 }
 
-func NewHTTPFilteringConn(reqPipeRd *io.PipeReader, resPipeWr *io.PipeWriter) *HTTPFilteringConn {
+func NewHTTPFilteringConn(reqPipeRd io.ReadCloser, resPipeWr io.WriteCloser) *HTTPFilteringConn {
 	return &HTTPFilteringConn{
 		reqPipeRd: reqPipeRd,
 		resPipeWr: resPipeWr,
