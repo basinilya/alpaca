@@ -12,6 +12,7 @@ require (
 	github.com/stretchr/testify v1.9.0
 	github.com/zalando/go-keyring v0.2.5
 	golang.org/x/term v0.21.0
+	v2ray.com/core v4.19.1+incompatible
 )
 
 require (
@@ -19,6 +20,7 @@ require (
 	github.com/danieljoos/wincred v1.2.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/godbus/dbus/v5 v5.1.0 // indirect
+	github.com/golang/protobuf v1.2.1-0.20190205222052-c823c79ea157 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
 	golang.org/x/crypto v0.24.0 // indirect
 	golang.org/x/sys v0.21.0 // indirect

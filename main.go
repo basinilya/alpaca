@@ -84,6 +84,8 @@ func main() {
 
 	s := createServer(*host, *port, *pacurl, a)
 
+	startSocks5ListenerWithHandler(s.Handler)
+
 	for _, network := range networks(*host) {
 		go func(network string) {
 			l, err := net.Listen(network, s.Addr)
