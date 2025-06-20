@@ -66,9 +66,10 @@ func startSocks5ListenerWithHandler(httpHandler http.Handler) error {
 			if err != nil {
 				continue
 			}
+			conn2 := conn.(*net.TCPConn)
 			// Pass conn to SOCKS5 protocol handler
 			go func() {
-				handleV2RaySocksConn(conn, httpHandler, socksServer)
+				handleV2RaySocksConn(conn2, httpHandler, socksServer)
 			}()
 		}
 	}()
@@ -76,7 +77,7 @@ func startSocks5ListenerWithHandler(httpHandler http.Handler) error {
 	return nil
 }
 
-func handleV2RaySocksConn(conn net.Conn, handler http.Handler, socksServer *socks.Server) {
+func handleV2RaySocksConn(conn *net.TCPConn, handler http.Handler, socksServer *socks.Server) {
 	var err error
 	defer conn.Close()
 	ctx := context.Background()
@@ -84,19 +85,103 @@ func handleV2RaySocksConn(conn net.Conn, handler http.Handler, socksServer *sock
 		Gateway: net.TCPDestination(net.AnyIP, 0),
 	})
 
-	dispatcher := &AlpacaVDispatcher{handler}
+	conn2 := &handshakeConn{TCPConn: conn}
+	dispatcher := &AlpacaVDispatcher{handler, conn2}
 
 	// This will parse the handshake and call
 	// dispatcher.Dispatch() then copy the data in both directions
-	err = socksServer.Process(ctx, net.Network_TCP, conn, dispatcher)
+	err = socksServer.Process(ctx, net.Network_TCP, conn2, dispatcher)
 	if err != nil {
 		log.Printf("SOCKS Process failed: %v", err)
 		return
 	}
 }
 
+const (
+	handshakePassRequested = 3
+	handshakeAuthenticated = 6
+	handshakeGranted       = 9
+	handshakeEnded         = 10
+)
+
+type handshakeConn struct {
+	*net.TCPConn
+	state     int
+	headerBuf bytes.Buffer
+}
+
+func (c *handshakeConn) Read(b []byte) (int, error) {
+	if c.headerBuf.Len() > 0 && len(b) > 0 {
+		// unexpected read
+		c.flushHandshake(handshakeEnded)
+	}
+	return c.TCPConn.Read(b)
+}
+
+func (c *handshakeConn) Write(b []byte) (n int, err error) {
+	if c.state >= handshakeEnded {
+		return c.TCPConn.Write(b)
+	}
+
+	var n2 int
+	var b2 []byte
+	n, err = c.headerBuf.Write(b)
+	if err != nil || c.headerBuf.Len() < 2 {
+		return n, err
+	}
+	b2 = c.headerBuf.Bytes()
+
+	newstate := handshakeEnded
+	if c.state <= 0 {
+		if b2[0] == 0x00 {
+			// v4
+			if b2[1] == 90 {
+				// granted, will flush later
+				c.state = handshakeGranted
+				return n, err
+			}
+		} else if b2[0] == 5 {
+			// v5
+			if b2[1] == 0 {
+				// authNotRequired
+				newstate = handshakeAuthenticated
+			} else if b2[1] != 0xFF {
+				// password
+				newstate = handshakePassRequested
+			}
+		}
+	} else if c.state <= handshakePassRequested {
+		// v5 password
+		if b2[0] == 0x01 && b2[1] == 0x00 {
+			// pasword ok
+			newstate = handshakeAuthenticated
+		}
+	} else if c.state <= handshakeAuthenticated {
+		// v5 command response
+		if b2[0] == 5 && b2[1] == 0 {
+			// granted, will flush later
+			c.state = handshakeGranted
+			return n, err
+		}
+	} else if c.state <= handshakeGranted {
+		// accumulate the remainder of granted response
+		return n, err
+	}
+
+	n2, err = c.flushHandshake(newstate)
+	n = min(n, n2)
+	return n, err
+}
+
+func (c *handshakeConn) flushHandshake(newstate int) (int, error) {
+	c.state = newstate
+	n64, err := c.headerBuf.WriteTo(c.TCPConn)
+	return int(n64), err
+}
+
 type AlpacaVDispatcher struct {
-	handler http.Handler
+	handler       http.Handler
+	handshakeConn *handshakeConn
 }
 
 func (d *AlpacaVDispatcher) Dispatch(ctx context.Context, dest net.Destination) (*v_transport.Link, error) {
@@ -165,6 +250,10 @@ func (d *AlpacaVDispatcher) Dispatch(ctx context.Context, dest net.Destination) 
 		Writer: linkWriter, // request
 	}
 
+	_, err = d.handshakeConn.flushHandshake(handshakeEnded)
+	if err != nil {
+		return nil, err
+	}
 	return link, nil
 }
 
