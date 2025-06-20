@@ -40,7 +40,7 @@ func startSocks5ListenerWithHandler(httpHandler http.Handler) error {
 	debugTimeouts := &app_policy.Policy_Timeout{
 		Handshake:      &app_policy.Second{Value: 199},
 		ConnectionIdle: &app_policy.Second{Value: 119},
-		UplinkOnly:     &app_policy.Second{Value: 118},
+		UplinkOnly:     &app_policy.Second{Value: 18},
 		DownlinkOnly:   &app_policy.Second{Value: 117},
 	}
 	debugAppPolicyConfig := &app_policy.Policy{Timeout: debugTimeouts}
@@ -97,18 +97,21 @@ func handleV2RaySocksConn(conn *net.TCPConn, handler http.Handler, socksServer *
 	}
 }
 
+// Wrapper that delays the socks granted response until Dispatch() returns a
+// connected Link because V2Ray 4.19.1 writes this response immediately causing
+// false success
+type handshakeConn struct {
+	*net.TCPConn
+	state     int
+	headerBuf bytes.Buffer
+}
+
 const (
 	handshakePassRequested = 3
 	handshakeAuthenticated = 6
 	handshakeGranted       = 9
 	handshakeEnded         = 10
 )
-
-type handshakeConn struct {
-	*net.TCPConn
-	state     int
-	headerBuf bytes.Buffer
-}
 
 func (c *handshakeConn) Read(b []byte) (int, error) {
 	if c.headerBuf.Len() > 0 && len(b) > 0 {
@@ -119,7 +122,7 @@ func (c *handshakeConn) Read(b []byte) (int, error) {
 }
 
 func (c *handshakeConn) Write(b []byte) (n int, err error) {
-	if c.state >= handshakeEnded {
+	if c.state == handshakeEnded {
 		return c.TCPConn.Write(b)
 	}
 
@@ -132,7 +135,7 @@ func (c *handshakeConn) Write(b []byte) (n int, err error) {
 	b2 = c.headerBuf.Bytes()
 
 	newstate := handshakeEnded
-	if c.state <= 0 {
+	if c.state == 0 {
 		if b2[0] == 0x00 {
 			// v4
 			if b2[1] == 90 {
@@ -150,20 +153,20 @@ func (c *handshakeConn) Write(b []byte) (n int, err error) {
 				newstate = handshakePassRequested
 			}
 		}
-	} else if c.state <= handshakePassRequested {
+	} else if c.state == handshakePassRequested {
 		// v5 password
 		if b2[0] == 0x01 && b2[1] == 0x00 {
 			// pasword ok
 			newstate = handshakeAuthenticated
 		}
-	} else if c.state <= handshakeAuthenticated {
+	} else if c.state == handshakeAuthenticated {
 		// v5 command response
 		if b2[0] == 5 && b2[1] == 0 {
 			// granted, will flush later
 			c.state = handshakeGranted
 			return n, err
 		}
-	} else if c.state <= handshakeGranted {
+	} else if c.state == handshakeGranted {
 		// accumulate the remainder of granted response
 		return n, err
 	}
@@ -385,6 +388,10 @@ func (c *HTTPFilteringConn) Close() error {
 	return nil
 }
 
+// Send EOF without closing the entire Link
+// Note that V2Ray 4.19.1 only does graceful shutdown for uploads by closing
+// Link.Writer but it doesn't call net.Conn.CloseWrite() for downloads and just
+// keeps it open until the UplinkOnly timeout
 func (c *HTTPFilteringConn) CloseWrite() error {
 	return c.resPipeWr.Close()
 }
