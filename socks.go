@@ -355,7 +355,5 @@ func (w *dummyResponseWriter) WriteHeader(statusCode int) {
 		pref = "HTTP/1.0 "
 	}
 
-	if statusCode == http.StatusOK {
-		w.conn.Write([]byte(pref + strconv.Itoa(statusCode) + " Dummy Phrase\r\n\r\n"))
-	}
+	w.conn.Write([]byte(pref + strconv.Itoa(statusCode) + " Dummy Phrase\r\n\r\n"))
 }

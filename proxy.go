@@ -142,7 +142,7 @@ func (ph ProxyHandler) handleConnect(w http.ResponseWriter, req *http.Request) {
 			}
 		}()
 		_, err2 := io.Copy(dst, src)
-		log.Printf("[%d] %s Copy ended with: %v", id, description, err2)
+		log.Printf("[%d] %s ended with: %v", id, description, err2)
 		if err2 == nil {
 			tcpConn, b := dst.(HasCloseWrite)
 			if b {
