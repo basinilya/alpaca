@@ -170,6 +170,9 @@ func connectDirect(req *http.Request) (net.Conn, error) {
 
 func connectViaProxy(req *http.Request, proxy *url.URL, auth *authenticator) (net.Conn, error) {
 	id := req.Context().Value(contextKeyID)
+	if proxy.Scheme == "socks" {
+		return connectViaSocks(id, proxy.Host, req.Host)
+	}
 	var tr transport
 	defer tr.Close()
 	if err := tr.dial(proxy); err != nil {

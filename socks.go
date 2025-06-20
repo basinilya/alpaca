@@ -22,13 +22,49 @@ import (
 	app_policy "v2ray.com/core/app/policy"
 	"v2ray.com/core/common/buf"
 	"v2ray.com/core/common/net"
+	"v2ray.com/core/common/protocol"
 	"v2ray.com/core/common/session"
 	"v2ray.com/core/proxy/socks"
 	v_transport "v2ray.com/core/transport"
 )
 
-func ServerType() interface{} {
-	return (*AlpacaVDispatcher)(nil)
+func connectViaSocks(id any, proxyHostAndPort string, destHostAndPort string) (net.Conn, error) {
+	var err error
+	dest, err := net.ParseDestination(destHostAndPort)
+	if err != nil {
+		log.Printf("[%d] Invalid destination %s: %v", id, destHostAndPort, err)
+		return nil, err
+	}
+
+	closeInDefer := true
+
+	conn, err := net.Dial("tcp", proxyHostAndPort)
+	if err != nil {
+		log.Printf("[%d] Error dialling socks %s: %v", id, proxyHostAndPort, err)
+		return nil, err
+	}
+
+	defer func() {
+		if closeInDefer {
+			conn.Close()
+		}
+	}()
+
+	request := &protocol.RequestHeader{
+		Version: 5,
+		Command: protocol.RequestCommandTCP,
+		Address: dest.Address,
+		Port:    dest.Port,
+	}
+
+	_, err = socks.ClientHandshake(request, conn, conn)
+	if err != nil {
+		log.Printf("[%d] socks handshake failed: %v", id, err)
+		return nil, err
+	}
+
+	closeInDefer = false
+	return conn, nil
 }
 
 func startSocks5ListenerWithHandler(httpHandler http.Handler) error {
@@ -295,7 +331,11 @@ func (d *AlpacaVDispatcher) Start() error {
 }
 
 func (d *AlpacaVDispatcher) Type() interface{} {
-	return ServerType()
+	return AlpacaVDispatcherType()
+}
+
+func AlpacaVDispatcherType() interface{} {
+	return (*AlpacaVDispatcher)(nil)
 }
 
 type HTTPFilteringConn struct {
