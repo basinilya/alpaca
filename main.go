@@ -40,6 +40,7 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile | log.Lmicroseconds)
 	host := flag.String("l", "localhost", "address to listen on")
 	port := flag.Int("p", 3128, "port number to listen on")
+	sockshostandport := flag.String("socks", "", "socks address to listen on")
 	pacurl := flag.String("C", "", "url of proxy auto-config (pac) file")
 	domain := flag.String("d", "", "domain of the proxy account (for NTLM auth)")
 	username := flag.String("u", whoAmI(), "username of the proxy account (for NTLM auth)")
@@ -84,7 +85,9 @@ func main() {
 
 	s := createServer(*host, *port, *pacurl, a)
 
-	startSocks5ListenerWithHandler(s.Handler)
+	if *sockshostandport != "" {
+		startSocks5ListenerWithHandler(s.Handler, *sockshostandport)
+	}
 
 	for _, network := range networks(*host) {
 		go func(network string) {

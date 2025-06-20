@@ -67,7 +67,7 @@ func connectViaSocks(id any, proxyHostAndPort string, destHostAndPort string) (n
 	return conn, nil
 }
 
-func startSocks5ListenerWithHandler(httpHandler http.Handler) error {
+func startSocks5ListenerWithHandler(httpHandler http.Handler, listenhostandport string) error {
 
 	serverConfig := socks.ServerConfig{
 		AuthType:  socks.AuthType_NO_AUTH,
@@ -87,28 +87,88 @@ func startSocks5ListenerWithHandler(httpHandler http.Handler) error {
 	dummyV.AddFeature(dummyManager)
 	tmp, err := core.CreateObject(&dummyV, &serverConfig)
 	if err != nil {
+		log.Printf("SOCKS failed to instantiate Server object: %s", err)
 		return err
 	}
 	socksServer := tmp.(*socks.Server)
 
-	ln, err := net.Listen("tcp", ":1080")
-	if err != nil {
-		return err
+	host, port, err1 := go_net.SplitHostPort(listenhostandport)
+	if err1 != nil {
+		tmp := go_net.JoinHostPort(listenhostandport, "1080")
+		host, port, err1 = go_net.SplitHostPort(tmp)
+		if err1 != nil {
+			log.Printf("SOCKS failed to parse %s: %s", listenhostandport, err)
+			return err1
+		}
+		listenhostandport = tmp
+	} else if port == "" {
+		port = "1080"
+		listenhostandport = go_net.JoinHostPort(host, port)
 	}
 
-	go func() {
-		for {
-			conn, err := ln.Accept()
-			if err != nil {
-				continue
-			}
-			conn2 := conn.(*net.TCPConn)
-			// Pass conn to SOCKS5 protocol handler
+	// LookupIP may return duplicates
+	uniqueIPs := make(map[string]struct{})
+	listenerCount := 0
+	var lasterr error
+
+	startAcceptLoop := func(ipport string) {
+		if _, seen := uniqueIPs[ipport]; seen {
+			return
+		}
+		uniqueIPs[ipport] = struct{}{}
+		ln, err := net.Listen("tcp", ipport)
+		if err != nil {
+			lasterr = err
+		} else {
+			sLnAddr := ln.Addr()
+			log.Printf("SOCKS listening on %s", sLnAddr)
+			listenerCount++
 			go func() {
-				handleV2RaySocksConn(conn2, httpHandler, socksServer)
+				defer ln.Close()
+				for {
+					conn, err := ln.Accept()
+					if err != nil {
+						log.Printf("SOCKS failed to accept on %s: %s", sLnAddr, err)
+						break
+					}
+					log.Printf("SOCKS accepted: %s -> %s", conn.RemoteAddr(), conn.LocalAddr())
+					conn2 := conn.(*net.TCPConn)
+					// Pass conn to SOCKS5 protocol handler
+					go func() {
+						handleV2RaySocksConn(conn2, httpHandler, socksServer)
+					}()
+				}
 			}()
 		}
-	}()
+	}
+
+	if host != "" {
+		unsortedips, err := net.LookupIP(host)
+		if err != nil {
+			log.Printf("SOCKS failed resolve %s: %s", host, err)
+			return err
+		}
+		// try ipv6 first in case [::1] implies 127.0.0.1
+		for _, ip := range unsortedips {
+			if ip.To4() == nil {
+				ipport := go_net.JoinHostPort(ip.String(), port)
+				startAcceptLoop(ipport)
+			}
+		}
+		for _, ip := range unsortedips {
+			if ip.To4() != nil {
+				ipport := go_net.JoinHostPort(ip.String(), port)
+				startAcceptLoop(ipport)
+			}
+		}
+	} else {
+		startAcceptLoop(listenhostandport)
+	}
+
+	if listenerCount == 0 {
+		log.Printf("SOCKS failed to listen on %s: %s", listenhostandport, lasterr)
+		return lasterr
+	}
 
 	return nil
 }
