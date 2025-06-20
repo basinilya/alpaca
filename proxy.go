@@ -134,6 +134,7 @@ func (ph ProxyHandler) handleConnect(w http.ResponseWriter, req *http.Request) {
 	closeInDefer = false
 	var ops atomic.Int32
 	copyFunc := func(dst io.Writer, src io.Reader, description string) {
+		var err error
 		closeInDefer2 := true
 		defer func() {
 			if ops.Add(1) >= 2 || closeInDefer2 {
@@ -141,9 +142,9 @@ func (ph ProxyHandler) handleConnect(w http.ResponseWriter, req *http.Request) {
 				server.Close()
 			}
 		}()
-		_, err2 := io.Copy(dst, src)
-		log.Printf("[%d] %s ended with: %v", id, description, err2)
-		if err2 == nil {
+		_, err = io.Copy(dst, src)
+		log.Printf("[%d] %s ended with: %v", id, description, err)
+		if err == nil {
 			tcpConn, b := dst.(HasCloseWrite)
 			if b {
 				closeInDefer2 = false

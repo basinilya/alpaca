@@ -28,6 +28,7 @@ import (
 	v_transport "v2ray.com/core/transport"
 )
 
+// called from connectViaProxy
 func connectViaSocks(id any, proxyHostAndPort string, destHostAndPort string) (net.Conn, error) {
 	var err error
 	dest, err := net.ParseDestination(destHostAndPort)
@@ -67,30 +68,12 @@ func connectViaSocks(id any, proxyHostAndPort string, destHostAndPort string) (n
 	return conn, nil
 }
 
+// called from main
 func startSocks5ListenerWithHandler(httpHandler http.Handler, listenhostandport string) error {
-
-	serverConfig := socks.ServerConfig{
-		AuthType:  socks.AuthType_NO_AUTH,
-		UserLevel: 1,
-	}
-	debugTimeouts := &app_policy.Policy_Timeout{
-		Handshake:      &app_policy.Second{Value: 199},
-		ConnectionIdle: &app_policy.Second{Value: 119},
-		UplinkOnly:     &app_policy.Second{Value: 18},
-		DownlinkOnly:   &app_policy.Second{Value: 117},
-	}
-	debugAppPolicyConfig := &app_policy.Policy{Timeout: debugTimeouts}
-	debugPolicyLevel := map[uint32]*app_policy.Policy{1: debugAppPolicyConfig}
-	policyConfig := &app_policy.Config{Level: debugPolicyLevel}
-	dummyManager, _ := app_policy.New(context.TODO(), policyConfig)
-	dummyV := core.Instance{}
-	dummyV.AddFeature(dummyManager)
-	tmp, err := core.CreateObject(&dummyV, &serverConfig)
+	socksServer, err := createSocksServer()
 	if err != nil {
-		log.Printf("SOCKS failed to instantiate Server object: %s", err)
 		return err
 	}
-	socksServer := tmp.(*socks.Server)
 
 	host, port, err1 := go_net.SplitHostPort(listenhostandport)
 	if err1 != nil {
@@ -121,8 +104,8 @@ func startSocks5ListenerWithHandler(httpHandler http.Handler, listenhostandport 
 			lasterr = err
 		} else {
 			sLnAddr := ln.Addr()
-			log.Printf("SOCKS listening on %s", sLnAddr)
 			listenerCount++
+			log.Printf("SOCKS listening on %s", sLnAddr)
 			go func() {
 				defer ln.Close()
 				for {
@@ -145,21 +128,12 @@ func startSocks5ListenerWithHandler(httpHandler http.Handler, listenhostandport 
 	if host != "" {
 		unsortedips, err := net.LookupIP(host)
 		if err != nil {
-			log.Printf("SOCKS failed resolve %s: %s", host, err)
+			log.Printf("SOCKS failed to resolve %s: %s", host, err)
 			return err
 		}
-		// try ipv6 first in case [::1] implies 127.0.0.1
 		for _, ip := range unsortedips {
-			if ip.To4() == nil {
-				ipport := go_net.JoinHostPort(ip.String(), port)
-				startAcceptLoop(ipport)
-			}
-		}
-		for _, ip := range unsortedips {
-			if ip.To4() != nil {
-				ipport := go_net.JoinHostPort(ip.String(), port)
-				startAcceptLoop(ipport)
-			}
+			ipport := go_net.JoinHostPort(ip.String(), port)
+			startAcceptLoop(ipport)
 		}
 	} else {
 		startAcceptLoop(listenhostandport)
@@ -173,16 +147,43 @@ func startSocks5ListenerWithHandler(httpHandler http.Handler, listenhostandport 
 	return nil
 }
 
+func createSocksServer() (*socks.Server, error) {
+	serverConfig := socks.ServerConfig{
+		AuthType:  socks.AuthType_NO_AUTH,
+		UserLevel: 1,
+	}
+	// default was 1 second
+	timeouts := &app_policy.Policy_Timeout{
+		Handshake:    &app_policy.Second{Value: 20},
+		UplinkOnly:   &app_policy.Second{Value: 20},
+		DownlinkOnly: &app_policy.Second{Value: 20},
+	}
+	appPolicyConfig := &app_policy.Policy{Timeout: timeouts}
+	policyLevel := map[uint32]*app_policy.Policy{1: appPolicyConfig}
+	policyConfig := &app_policy.Config{Level: policyLevel}
+	dummyManager, _ := app_policy.New(context.TODO(), policyConfig)
+	dummyV := core.Instance{}
+	dummyV.AddFeature(dummyManager)
+	tmp, err := core.CreateObject(&dummyV, &serverConfig)
+	if err != nil {
+		log.Printf("SOCKS failed to instantiate Server object: %s", err)
+		return nil, err
+	}
+	socksServer := tmp.(*socks.Server)
+	return socksServer, nil
+}
+
 func handleV2RaySocksConn(conn *net.TCPConn, handler http.Handler, socksServer *socks.Server) {
 	var err error
 	defer conn.Close()
 	ctx := context.Background()
 	ctx = session.ContextWithInbound(ctx, &session.Inbound{
+		// This field is used by UDP but V2Ray checks its presence unconditionally
 		Gateway: net.TCPDestination(net.AnyIP, 0),
 	})
 
 	conn2 := &handshakeConn{TCPConn: conn}
-	dispatcher := &AlpacaVDispatcher{handler, conn2}
+	dispatcher := &alpacaVDispatcher{handler, conn2}
 
 	// This will parse the handshake and call
 	// dispatcher.Dispatch() then copy the data in both directions
@@ -278,12 +279,13 @@ func (c *handshakeConn) flushHandshake(newstate int) (int, error) {
 	return int(n64), err
 }
 
-type AlpacaVDispatcher struct {
+// Object with Dispatch() method
+type alpacaVDispatcher struct {
 	handler       http.Handler
 	handshakeConn *handshakeConn
 }
 
-func (d *AlpacaVDispatcher) Dispatch(ctx context.Context, dest net.Destination) (*v_transport.Link, error) {
+func (d *alpacaVDispatcher) Dispatch(ctx context.Context, dest net.Destination) (*v_transport.Link, error) {
 	var err error
 
 	targetAddr := dest.NetAddr()
@@ -303,23 +305,15 @@ func (d *AlpacaVDispatcher) Dispatch(ctx context.Context, dest net.Destination) 
 	}
 	fakeReq = fakeReq.WithContext(ctx)
 
-	var reqPipeRd io.ReadCloser
-	var reqPipeWr io.WriteCloser
-	var resPipeRd io.ReadCloser
-	var resPipeWr io.WriteCloser
+	reqPipeRd, reqPipeWr := io.Pipe()
+	resPipeRd, resPipeWr := io.Pipe()
 
-	reqPipeRd, reqPipeWr = io.Pipe()
-	resPipeRd, resPipeWr = io.Pipe()
-
-	reqPipeRd, reqPipeWr = LoggingPipeWrap("req", reqPipeRd, reqPipeWr)
-	resPipeRd, resPipeWr = LoggingPipeWrap("res", resPipeRd, resPipeWr)
-
-	conn := NewHTTPFilteringConn(reqPipeRd, resPipeWr)
+	conn := newHTTPFilteringConn(reqPipeRd, resPipeWr)
 	rw := &dummyResponseWriter{req: fakeReq, conn: conn}
 
 	// Call Alpaca’s handler in background
 	go d.handler.ServeHTTP(rw, fakeReq)
-	statusOk, err := conn.WaitReady(ctx)
+	statusOk, err := conn.waitReady(ctx)
 	if err != nil {
 		reqPipeRd.Close()
 		resPipeRd.Close()
@@ -334,12 +328,12 @@ func (d *AlpacaVDispatcher) Dispatch(ctx context.Context, dest net.Destination) 
 	// The Writer returned by Dispatch() is expected to implement Close().
 	// After one request the upstream server is likely to keep the connection open.
 	// Close() helps to detect the disconnected downstream
-	linkReader := struct {
+	linkReader := &struct {
 		io.ReadCloser
 		buf.Reader
 	}{ReadCloser: resPipeRd, Reader: buf.NewReader(resPipeRd)}
 
-	linkWriter := struct {
+	linkWriter := &struct {
 		io.WriteCloser
 		buf.Writer
 	}{WriteCloser: reqPipeWr, Writer: buf.NewWriter(reqPipeWr)}
@@ -356,49 +350,27 @@ func (d *AlpacaVDispatcher) Dispatch(ctx context.Context, dest net.Destination) 
 	return link, nil
 }
 
-func LoggingPipeWrap(id string, r io.ReadCloser, w io.WriteCloser) (io.ReadCloser, io.WriteCloser) {
-	return &loggingPipeReader{ReadCloser: r, id: id}, &loggingPipeWriter{WriteCloser: w, id: id}
-}
-
-type loggingPipeReader struct {
-	io.ReadCloser
-	id string // optional: tag for logging
-}
-
-func (r *loggingPipeReader) Close() error {
-	log.Printf("PipeReader %s closing", r.id)
-	return r.ReadCloser.Close()
-}
-
-type loggingPipeWriter struct {
-	io.WriteCloser
-	id string
-}
-
-func (w *loggingPipeWriter) Close() error {
-	log.Printf("PipeWriter %s closing", w.id)
-	return w.WriteCloser.Close()
-}
-
-func (d *AlpacaVDispatcher) Close() error {
-	// no-op
-	log.Printf("Closing Dispatcher")
+func (d *alpacaVDispatcher) Close() error {
+	// no-op and it's not called anyway
 	return nil
 }
 
-func (d *AlpacaVDispatcher) Start() error {
+func (d *alpacaVDispatcher) Start() error {
 	panic("unimplemented")
 }
 
-func (d *AlpacaVDispatcher) Type() interface{} {
-	return AlpacaVDispatcherType()
+func (d *alpacaVDispatcher) Type() interface{} {
+	return alpacaVDispatcherType()
 }
 
-func AlpacaVDispatcherType() interface{} {
-	return (*AlpacaVDispatcher)(nil)
+func alpacaVDispatcherType() interface{} {
+	return (*alpacaVDispatcher)(nil)
 }
 
-type HTTPFilteringConn struct {
+// Wrapper that discards CONNECT response headers written to it and handles the
+// payload normally. Created with the constructor function because of the chan
+// field.
+type httpDiscardingConn struct {
 	reqPipeRd io.ReadCloser
 	resPipeWr io.WriteCloser
 
@@ -410,15 +382,17 @@ type HTTPFilteringConn struct {
 	readyCh chan struct{} // closed when headerDone is set
 }
 
-func NewHTTPFilteringConn(reqPipeRd io.ReadCloser, resPipeWr io.WriteCloser) *HTTPFilteringConn {
-	return &HTTPFilteringConn{
+// Creates the object
+func newHTTPFilteringConn(reqPipeRd io.ReadCloser, resPipeWr io.WriteCloser) *httpDiscardingConn {
+	return &httpDiscardingConn{
 		reqPipeRd: reqPipeRd,
 		resPipeWr: resPipeWr,
 		readyCh:   make(chan struct{}),
 	}
 }
 
-func (c *HTTPFilteringConn) WaitReady(ctx context.Context) (bool, error) {
+// Waits until CONNECT response headers are discarded and the outcome is known
+func (c *httpDiscardingConn) waitReady(ctx context.Context) (bool, error) {
 	select {
 	case <-ctx.Done():
 		return false, ctx.Err()
@@ -427,7 +401,10 @@ func (c *HTTPFilteringConn) WaitReady(ctx context.Context) (bool, error) {
 	}
 }
 
-func (c *HTTPFilteringConn) Write(b []byte) (int, error) {
+// Discards the CONNECT response headers and discards the error response body.
+// Sets the status field and unblocks the waiters.
+// It handles the success response body normally.
+func (c *httpDiscardingConn) Write(b []byte) (int, error) {
 	if c.headerDone {
 		if !c.statusOK {
 			return len(b), nil // Discard
@@ -471,7 +448,8 @@ func (c *HTTPFilteringConn) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
-func (c *HTTPFilteringConn) markReady(ok bool, err error) {
+// Unblocks the waiters
+func (c *httpDiscardingConn) markReady(ok bool, err error) {
 	if !c.headerDone {
 		c.headerDone = true
 		c.statusOK = ok
@@ -481,8 +459,7 @@ func (c *HTTPFilteringConn) markReady(ok bool, err error) {
 }
 
 // Close implements net.Conn.
-func (c *HTTPFilteringConn) Close() error {
-	log.Printf("Closing HTTPFilteringConn")
+func (c *httpDiscardingConn) Close() error {
 	c.reqPipeRd.Close()
 	c.resPipeWr.Close()
 	return nil
@@ -491,46 +468,48 @@ func (c *HTTPFilteringConn) Close() error {
 // Send EOF without closing the entire Link
 // Note that V2Ray 4.19.1 only does graceful shutdown for uploads by closing
 // Link.Writer but it doesn't call net.Conn.CloseWrite() for downloads and just
-// keeps it open until the UplinkOnly timeout
-func (c *HTTPFilteringConn) CloseWrite() error {
+// keeps them open until the UplinkOnly timeout
+func (c *httpDiscardingConn) CloseWrite() error {
 	return c.resPipeWr.Close()
 }
 
 // Read implements net.Conn.
-func (c *HTTPFilteringConn) Read(b []byte) (n int, err error) {
+func (c *httpDiscardingConn) Read(b []byte) (n int, err error) {
 	return c.reqPipeRd.Read(b)
 }
 
 // LocalAddr implements net.Conn.
-func (c *HTTPFilteringConn) LocalAddr() go_net.Addr {
+func (c *httpDiscardingConn) LocalAddr() go_net.Addr {
 	panic("unimplemented")
 }
 
 // RemoteAddr implements net.Conn.
-func (c *HTTPFilteringConn) RemoteAddr() go_net.Addr {
+func (c *httpDiscardingConn) RemoteAddr() go_net.Addr {
 	panic("unimplemented")
 }
 
 // SetDeadline implements net.Conn.
-func (c *HTTPFilteringConn) SetDeadline(t time.Time) error {
+func (c *httpDiscardingConn) SetDeadline(t time.Time) error {
 	panic("unimplemented")
 }
 
 // SetReadDeadline implements net.Conn.
-func (c *HTTPFilteringConn) SetReadDeadline(t time.Time) error {
+func (c *httpDiscardingConn) SetReadDeadline(t time.Time) error {
 	panic("unimplemented")
 }
 
 // SetWriteDeadline implements net.Conn.
-func (c *HTTPFilteringConn) SetWriteDeadline(t time.Time) error {
+func (c *httpDiscardingConn) SetWriteDeadline(t time.Time) error {
 	panic("unimplemented")
 }
 
+// Object to pass to http.Handler.ServeHTTP()
 type dummyResponseWriter struct {
 	req  *http.Request
 	conn net.Conn
 }
 
+// Called by Alpaca
 func (w *dummyResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return w.conn, nil, nil
 }
@@ -543,6 +522,7 @@ func (w *dummyResponseWriter) Write(p []byte) (int, error) {
 	return w.conn.Write(p)
 }
 
+// Called by Alpaca
 func (w *dummyResponseWriter) WriteHeader(statusCode int) {
 	var pref string
 	if w.req.ProtoAtLeast(1, 1) {
