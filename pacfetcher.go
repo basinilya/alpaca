@@ -20,6 +20,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -33,10 +35,10 @@ const maxResponseBytes = 1 * 1024 * 1024
 var delayAfterFailedDownload = 2 * time.Second
 
 type pacFetcher struct {
-	pacFinder  *pacFinder
-	monitor    netMonitor
-	client     *http.Client
-	connected  bool
+	pacFinder *pacFinder
+	monitor   netMonitor
+	client    *http.Client
+	connected bool
 	//cache  []byte
 	//modified time.Time
 	//fetched time.Time
@@ -46,27 +48,111 @@ type pacFetcher struct {
 
 func newPACFetcher(pacurl string) *pacFetcher {
 	client := &http.Client{Timeout: 30 * time.Second}
-	if strings.HasPrefix(pacurl, "file:") {
-		log.Print("Warning: When using a local PAC file, the online/offline status can't ",
-			"be determined by the fact that the PAC file is downloaded. Make sure you ",
-			"check for proxy connectivity in your PAC file!")
-		if runtime.GOOS == "windows" {
-			client.Transport = http.NewFileTransport(http.Dir("C:"))
-		} else {
-			client.Transport = http.NewFileTransport(http.Dir("/"))
+	client.Transport = &transportWrapper{}
+	u, err := url.Parse(pacurl)
+
+	if err == nil {
+		if !u.IsAbs() && validateFileUri(u) == nil {
+			// If URI already contains file: scheme it can't legally contain relative
+			// file path. Therefore if relative file path is needed don't use the scheme
+			p, err := filepath.Abs(u.Path)
+			if err == nil {
+				p = filepath.ToSlash(p)
+				if (runtime.GOOS == "windows" && len(p) >= 2 && p[1] == ':') ||
+					(strings.HasPrefix(p, "//") && !strings.HasPrefix(p, "///")) {
+					// Add an extra leading slash for Windows drive letter or UNC path
+					p = "/" + p
+				}
+				u = &url.URL{
+					Scheme: "file",
+					Path:   p,
+				}
+				pacurl = u.String()
+			}
 		}
+		if strings.EqualFold(u.Scheme, "file") {
+			log.Print("Warning: When using a local PAC file, the online/offline status can't ",
+				"be determined by the fact that the PAC file is downloaded. Make sure you ",
+				"check for proxy connectivity in your PAC file!")
+		}
+	}
+	return &pacFetcher{
+		pacFinder: newPacFinder(pacurl),
+		monitor:   newNetMonitor(),
+		client:    client,
+	}
+}
+
+type transportWrapper struct {
+	http.RoundTripper
+}
+
+// Modifies the request URL when necessary and calls the delegate transport
+func (t *transportWrapper) RoundTrip(req *http.Request) (*http.Response, error) {
+	u := req.URL
+	scheme := u.Scheme
+
+	var delegate http.RoundTripper
+	if strings.EqualFold(scheme, "file") {
+		// file:a/b - opaque=a/b, path= , not supported
+		// file:/a/b - path=/a - java canonical
+		// => "/", "a/b"
+		// file://a/b - host=a, not supported
+		// file:///a/b - absolute file, path=/a/b, volume name ""
+		// => "/", "a/b"
+		// file:///C:/a/b - absolute file, path=/C:/a/b, volume name bad
+		// => "C:\\", "a/b"
+		// file:////a/b/c - path=//a/b/c, UNC, java canonical, volume name \\a\b
+		// => "\\\\a\\b\\", "c"
+		// file://///a/b/c - path=///a, UNC, browser canonical, volume name bad
+		// => "\\\\a\\b\\", "c"
+
+		err := validateFileUri(u)
+		if err != nil {
+			return nil, err
+		}
+
+		fsRoot := "/"
+		if runtime.GOOS == "windows" {
+			// the result of NewFileTransport doesn't support drive letters in URLs, extracting into fs root
+			p := u.Path
+			if strings.HasPrefix(p, "/") && (strings.HasPrefix(p, "///") || (len(p) >= 3 && p[2] == ':')) {
+				// keep two slashes in UNC or no slashes in drive letter
+				p = p[1:]
+			}
+			volName := filepath.VolumeName(p)
+			if volName != "" {
+				// internal path joiner omits the separator if fs root ends with a colon:
+				// "C:folder\subfolder"
+				fsRoot = volName + "\\"
+				remainder := p[min(len(fsRoot), len(p)):]
+				u = &url.URL{
+					Scheme: "file",
+					Path:   remainder,
+				}
+				req.URL = u
+			}
+		}
+		delegate = http.NewFileTransport(http.Dir(fsRoot))
 	} else {
 		// The DefaultClient in net/http uses the proxy specified in the http(s)_proxy
 		// environment variable, which could be pointing at this instance of alpaca. When
 		// fetching the PAC file, we always use a client that goes directly to the server,
 		// rather than via a proxy.
-		client.Transport = &http.Transport{Proxy: nil}
+		delegate = &http.Transport{Proxy: nil}
 	}
-	return &pacFetcher{
-		pacFinder:  newPacFinder(pacurl),
-		monitor:    newNetMonitor(),
-		client:     client,
+	return delegate.RoundTrip(req)
+}
+
+// validates possibly relative file uri
+func validateFileUri(uri *url.URL) error {
+	if uri.Opaque != "" {
+		return fmt.Errorf("URI is not hierarchical")
 	}
+	if uri.User != nil || uri.Host != "" {
+		return fmt.Errorf("URI has an authority component")
+	}
+	return nil
 }
 
 func requireOK(resp *http.Response, err error) (*http.Response, error) {
