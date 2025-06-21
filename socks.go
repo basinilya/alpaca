@@ -159,7 +159,7 @@ func createSocksServer() (*socks.Server, error) {
 	var timeoutsSecond uint32 = 200
 	timeouts := &app_policy.Policy_Timeout{
 		Handshake:    &app_policy.Second{Value: timeoutsSecond},
-		UplinkOnly:   &app_policy.Second{Value: timeoutsSecond},
+		UplinkOnly:   &app_policy.Second{Value: timeoutsSecond/10 + 1},
 		DownlinkOnly: &app_policy.Second{Value: timeoutsSecond},
 	}
 	appPolicyConfig := &app_policy.Policy{Timeout: timeouts}
@@ -199,7 +199,7 @@ func handleV2RaySocksConn(conn *net.TCPConn, handler http.Handler, socksServer *
 	})
 
 	conn2 := &handshakeConn{TCPConn: conn}
-	// conn2.state = handshakeEnded // disable the workaround
+	conn2.state = handshakeEnded // disable the workaround
 	dispatcher := &alpacaVDispatcher{handler, conn2}
 
 	// This will parse the handshake and call
