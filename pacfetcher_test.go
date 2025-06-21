@@ -20,7 +20,6 @@ import (
 	"net/url"
 	"os"
 	"path"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -123,7 +122,7 @@ func TestPacFromFilesystem(t *testing.T) {
 	defer os.RemoveAll(tempdir)
 	pacPath := path.Join(tempdir, "test.pac")
 	require.NoError(t, os.WriteFile(pacPath, content, 0644))
-	pacURL := &url.URL{Scheme: "file", Path: filepath.ToSlash(pacPath)}
+	pacURL := &url.URL{Scheme: "file", Path: fileToUriPath(pacPath)}
 	pf := newPACFetcher(pacURL.String())
 	pf.monitor = newNetMonitor()
 	assert.Equal(t, content, pf.download())
