@@ -17,15 +17,17 @@ import (
 
 	"strconv"
 
-	"v2ray.com/core"
+	core "github.com/v2fly/v2ray-core/v5"
+	"github.com/v2fly/v2ray-core/v5/common/serial"
+	anypb "google.golang.org/protobuf/types/known/anypb"
 
-	app_policy "v2ray.com/core/app/policy"
-	"v2ray.com/core/common/buf"
-	"v2ray.com/core/common/net"
-	"v2ray.com/core/common/protocol"
-	"v2ray.com/core/common/session"
-	"v2ray.com/core/proxy/socks"
-	v_transport "v2ray.com/core/transport"
+	app_policy "github.com/v2fly/v2ray-core/v5/app/policy"
+	"github.com/v2fly/v2ray-core/v5/common/buf"
+	"github.com/v2fly/v2ray-core/v5/common/net"
+	"github.com/v2fly/v2ray-core/v5/common/protocol"
+	"github.com/v2fly/v2ray-core/v5/common/session"
+	"github.com/v2fly/v2ray-core/v5/proxy/socks"
+	v_transport "github.com/v2fly/v2ray-core/v5/transport"
 )
 
 // called from connectViaProxy
@@ -58,7 +60,8 @@ func connectViaSocks(id any, proxyHostAndPort string, destHostAndPort string) (n
 		Port:    dest.Port,
 	}
 
-	_, err = socks.ClientHandshake(request, conn, conn)
+	delayAuthWrite := false
+	_, err = socks.ClientHandshake(request, conn, conn, delayAuthWrite)
 	if err != nil {
 		log.Printf("[%d] socks handshake failed: %v", id, err)
 		return nil, err
@@ -153,18 +156,31 @@ func createSocksServer() (*socks.Server, error) {
 		UserLevel: 1,
 	}
 	// default was 1 second
+	var timeoutsSecond uint32 = 200
 	timeouts := &app_policy.Policy_Timeout{
-		Handshake:    &app_policy.Second{Value: 20},
-		UplinkOnly:   &app_policy.Second{Value: 20},
-		DownlinkOnly: &app_policy.Second{Value: 20},
+		Handshake:    &app_policy.Second{Value: timeoutsSecond},
+		UplinkOnly:   &app_policy.Second{Value: timeoutsSecond},
+		DownlinkOnly: &app_policy.Second{Value: timeoutsSecond},
 	}
 	appPolicyConfig := &app_policy.Policy{Timeout: timeouts}
 	policyLevel := map[uint32]*app_policy.Policy{1: appPolicyConfig}
 	policyConfig := &app_policy.Config{Level: policyLevel}
-	dummyManager, _ := app_policy.New(context.TODO(), policyConfig)
-	dummyV := core.Instance{}
-	dummyV.AddFeature(dummyManager)
-	tmp, err := core.CreateObject(&dummyV, &serverConfig)
+
+	coreConfig := &core.Config{
+		App: []*anypb.Any{
+			// Have to serialize policy early, otherwise a default policy
+			// will be appended before we can call AddFeature()
+			serial.ToTypedMessage(policyConfig),
+		},
+	}
+
+	// Instance can no longer be created without a constructor because ctx is now mandatory
+	dummyV, err := core.New(coreConfig)
+	if err != nil {
+		log.Printf("SOCKS failed to instantiate a dummy V2Ray Instance: %s", err)
+		return nil, err
+	}
+	tmp, err := core.CreateObject(dummyV, &serverConfig)
 	if err != nil {
 		log.Printf("SOCKS failed to instantiate Server object: %s", err)
 		return nil, err
@@ -183,6 +199,7 @@ func handleV2RaySocksConn(conn *net.TCPConn, handler http.Handler, socksServer *
 	})
 
 	conn2 := &handshakeConn{TCPConn: conn}
+	// conn2.state = handshakeEnded // disable the workaround
 	dispatcher := &alpacaVDispatcher{handler, conn2}
 
 	// This will parse the handshake and call
