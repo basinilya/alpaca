@@ -37,7 +37,7 @@ func TestFindProxyForRequest(t *testing.T) {
 		{"Direct", "return 'DIRECT'", false, ""},
 		{"Proxy", "return 'PROXY proxy.test:2'", false, "proxy.test:2"},
 		{"ProxyWithoutPort", "return 'PROXY proxy.test'", false, "proxy.test:80"},
-		{"Socks", "return 'SOCKS socksproxy.test:3'", true, "socksproxy.test:3"},
+		{"Socks", "return 'SOCKS socksproxy.test:3'", false, "socksproxy.test:3"},
 		{"Http", "return 'HTTP http.test:4'", false, "http.test:4"},
 		{"HttpWithoutPort", "return 'HTTP http.test'", false, "http.test:80"},
 		{"Https", "return 'HTTPS https.test:5'", false, "https.test:5"},
