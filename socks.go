@@ -389,7 +389,7 @@ func alpacaVDispatcherType() interface{} {
 // field.
 type httpDiscardingConn struct {
 	reqPipeRd io.ReadCloser
-	resPipeWr io.WriteCloser
+	resPipeWr *io.PipeWriter
 
 	headerBuf  bytes.Buffer
 	headerDone bool
@@ -400,7 +400,7 @@ type httpDiscardingConn struct {
 }
 
 // Creates the object
-func newHTTPFilteringConn(reqPipeRd io.ReadCloser, resPipeWr io.WriteCloser) *httpDiscardingConn {
+func newHTTPFilteringConn(reqPipeRd io.ReadCloser, resPipeWr *io.PipeWriter) *httpDiscardingConn {
 	return &httpDiscardingConn{
 		reqPipeRd: reqPipeRd,
 		resPipeWr: resPipeWr,
@@ -478,7 +478,8 @@ func (c *httpDiscardingConn) markReady(ok bool, err error) {
 // Close implements net.Conn.
 func (c *httpDiscardingConn) Close() error {
 	c.reqPipeRd.Close()
-	c.resPipeWr.Close()
+	// TODO: this won't replace EOF if it's already closed
+	c.resPipeWr.CloseWithError(fmt.Errorf("Connection is closed"))
 	return nil
 }
 
