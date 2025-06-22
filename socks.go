@@ -18,6 +18,7 @@ import (
 	"strconv"
 
 	core "github.com/v2fly/v2ray-core/v5"
+	"github.com/v2fly/v2ray-core/v5/common"
 	"github.com/v2fly/v2ray-core/v5/common/serial"
 	anypb "google.golang.org/protobuf/types/known/anypb"
 
@@ -28,6 +29,7 @@ import (
 	"github.com/v2fly/v2ray-core/v5/common/session"
 	"github.com/v2fly/v2ray-core/v5/proxy/socks"
 	v_transport "github.com/v2fly/v2ray-core/v5/transport"
+	v2pipe "github.com/v2fly/v2ray-core/v5/transport/pipe"
 )
 
 // called from connectViaProxy
@@ -322,7 +324,7 @@ func (d *alpacaVDispatcher) Dispatch(ctx context.Context, dest net.Destination) 
 	}
 	fakeReq = fakeReq.WithContext(ctx)
 
-	reqPipeRd, reqPipeWr := io.Pipe()
+	reqPipeRd, reqPipeWr := v2pipe.New()
 	resPipeRd, resPipeWr := io.Pipe()
 
 	conn := newHTTPFilteringConn(reqPipeRd, resPipeWr)
@@ -332,12 +334,12 @@ func (d *alpacaVDispatcher) Dispatch(ctx context.Context, dest net.Destination) 
 	go d.handler.ServeHTTP(rw, fakeReq)
 	statusOk, err := conn.waitReady(ctx)
 	if err != nil {
-		reqPipeRd.Close()
+		reqPipeRd.Interrupt()
 		resPipeRd.Close()
 		return nil, err
 	}
 	if !statusOk {
-		reqPipeRd.Close()
+		reqPipeRd.Interrupt()
 		resPipeRd.Close()
 		return nil, fmt.Errorf("failed to connect to upstream proxy")
 	}
@@ -350,14 +352,18 @@ func (d *alpacaVDispatcher) Dispatch(ctx context.Context, dest net.Destination) 
 		buf.Reader
 	}{ReadCloser: resPipeRd, Reader: buf.NewReader(resPipeRd)}
 
-	linkWriter := &struct {
-		io.WriteCloser
-		buf.Writer
-	}{WriteCloser: reqPipeWr, Writer: buf.NewWriter(reqPipeWr)}
+	// static check
+	var _ buf.Writer = reqPipeWr
+	var _ common.Interruptible = reqPipeWr
+	var _ common.Closable = reqPipeWr
+	var _ buf.Reader = reqPipeRd
+	var _ common.Interruptible = reqPipeRd
+	// read side is not Closable
+	// common.Closable reqPipeRd1
 
 	link := &v_transport.Link{
 		Reader: linkReader, // response
-		Writer: linkWriter, // request
+		Writer: reqPipeWr,  // request
 	}
 
 	_, err = d.handshakeConn.flushHandshake(handshakeEnded)
@@ -388,7 +394,7 @@ func alpacaVDispatcherType() interface{} {
 // payload normally. Created with the constructor function because of the chan
 // field.
 type httpDiscardingConn struct {
-	reqPipeRd io.ReadCloser
+	reqPipeRd *buf.BufferedReader
 	resPipeWr *io.PipeWriter
 
 	headerBuf  bytes.Buffer
@@ -400,9 +406,9 @@ type httpDiscardingConn struct {
 }
 
 // Creates the object
-func newHTTPFilteringConn(reqPipeRd io.ReadCloser, resPipeWr *io.PipeWriter) *httpDiscardingConn {
+func newHTTPFilteringConn(reqPipeRd *v2pipe.Reader, resPipeWr *io.PipeWriter) *httpDiscardingConn {
 	return &httpDiscardingConn{
-		reqPipeRd: reqPipeRd,
+		reqPipeRd: &buf.BufferedReader{Reader: reqPipeRd},
 		resPipeWr: resPipeWr,
 		readyCh:   make(chan struct{}),
 	}
@@ -477,7 +483,7 @@ func (c *httpDiscardingConn) markReady(ok bool, err error) {
 
 // Close implements net.Conn.
 func (c *httpDiscardingConn) Close() error {
-	c.reqPipeRd.Close()
+	c.reqPipeRd.Interrupt()
 	// TODO: this won't replace EOF if it's already closed
 	c.resPipeWr.CloseWithError(fmt.Errorf("Connection is closed"))
 	return nil
