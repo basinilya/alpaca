@@ -28,7 +28,7 @@ import (
 	"github.com/v2fly/v2ray-core/v5/common/protocol"
 	"github.com/v2fly/v2ray-core/v5/common/session"
 	"github.com/v2fly/v2ray-core/v5/proxy/socks"
-	v_transport "github.com/v2fly/v2ray-core/v5/transport"
+	v2transport "github.com/v2fly/v2ray-core/v5/transport"
 	v2pipe "github.com/v2fly/v2ray-core/v5/transport/pipe"
 )
 
@@ -37,7 +37,7 @@ func connectViaSocks(id any, proxyHostAndPort string, destHostAndPort string) (n
 	var err error
 	dest, err := net.ParseDestination(destHostAndPort)
 	if err != nil {
-		log.Printf("[%d] Invalid destination %s: %v", id, destHostAndPort, err)
+		log.Printf("[%d] socks client invalid destination %s: %v", id, destHostAndPort, err)
 		return nil, err
 	}
 
@@ -45,7 +45,7 @@ func connectViaSocks(id any, proxyHostAndPort string, destHostAndPort string) (n
 
 	conn, err := net.Dial("tcp", proxyHostAndPort)
 	if err != nil {
-		log.Printf("[%d] Error dialling socks %s: %v", id, proxyHostAndPort, err)
+		log.Printf("[%d] socks client error dialling %s: %v", id, proxyHostAndPort, err)
 		return nil, err
 	}
 
@@ -65,7 +65,7 @@ func connectViaSocks(id any, proxyHostAndPort string, destHostAndPort string) (n
 	delayAuthWrite := false
 	_, err = socks.ClientHandshake(request, conn, conn, delayAuthWrite)
 	if err != nil {
-		log.Printf("[%d] socks handshake failed: %v", id, err)
+		log.Printf("[%d] socks client handshake failed: %v", id, err)
 		return nil, err
 	}
 
@@ -304,7 +304,7 @@ type alpacaVDispatcher struct {
 	handshakeConn *handshakeConn
 }
 
-func (d *alpacaVDispatcher) Dispatch(ctx context.Context, dest net.Destination) (*v_transport.Link, error) {
+func (d *alpacaVDispatcher) Dispatch(ctx context.Context, dest net.Destination) (*v2transport.Link, error) {
 	var err error
 
 	targetAddr := dest.NetAddr()
@@ -324,10 +324,14 @@ func (d *alpacaVDispatcher) Dispatch(ctx context.Context, dest net.Destination) 
 	}
 	fakeReq = fakeReq.WithContext(ctx)
 
-	reqPipeRd, reqPipeWr := v2pipe.New()
-	resPipeRd, resPipeWr := io.Pipe()
+	reqPipeRd1, reqPipeWr := v2pipe.New()
+	resPipeRd1, resPipeWr1 := v2pipe.New()
 
-	conn := newHTTPFilteringConn(reqPipeRd, resPipeWr)
+	reqPipeRd := &buf.BufferedReader{Reader: reqPipeRd1}
+	resPipeWr := buf.NewBufferedWriter(resPipeWr1)
+	resPipeWr.SetBuffered(false)
+
+	conn := newHttpDiscardingConn(reqPipeRd, resPipeWr, resPipeWr1)
 	rw := &dummyResponseWriter{req: fakeReq, conn: conn}
 
 	// Call Alpaca’s handler in background
@@ -335,34 +339,21 @@ func (d *alpacaVDispatcher) Dispatch(ctx context.Context, dest net.Destination) 
 	statusOk, err := conn.waitReady(ctx)
 	if err != nil {
 		reqPipeRd.Interrupt()
-		resPipeRd.Close()
+		resPipeRd1.Interrupt()
 		return nil, err
 	}
 	if !statusOk {
 		reqPipeRd.Interrupt()
-		resPipeRd.Close()
+		resPipeRd1.Interrupt()
 		return nil, fmt.Errorf("failed to connect to upstream proxy")
 	}
 
 	// The Writer returned by Dispatch() is expected to implement Close().
 	// After one request the upstream server is likely to keep the connection open.
 	// Close() helps to detect the disconnected downstream
-	linkReader := &struct {
-		io.ReadCloser
-		buf.Reader
-	}{ReadCloser: resPipeRd, Reader: buf.NewReader(resPipeRd)}
 
-	// static check
-	var _ buf.Writer = reqPipeWr
-	var _ common.Interruptible = reqPipeWr
-	var _ common.Closable = reqPipeWr
-	var _ buf.Reader = reqPipeRd
-	var _ common.Interruptible = reqPipeRd
-	// read side is not Closable
-	// common.Closable reqPipeRd1
-
-	link := &v_transport.Link{
-		Reader: linkReader, // response
+	link := &v2transport.Link{
+		Reader: resPipeRd1, // response
 		Writer: reqPipeWr,  // request
 	}
 
@@ -394,8 +385,9 @@ func alpacaVDispatcherType() interface{} {
 // payload normally. Created with the constructor function because of the chan
 // field.
 type httpDiscardingConn struct {
-	reqPipeRd *buf.BufferedReader
-	resPipeWr *io.PipeWriter
+	reqPipeRd    *buf.BufferedReader
+	resPipeWr    *buf.BufferedWriter
+	resPipeInter common.Interruptible
 
 	headerBuf  bytes.Buffer
 	headerDone bool
@@ -406,11 +398,12 @@ type httpDiscardingConn struct {
 }
 
 // Creates the object
-func newHTTPFilteringConn(reqPipeRd *v2pipe.Reader, resPipeWr *io.PipeWriter) *httpDiscardingConn {
+func newHttpDiscardingConn(reqPipeRd *buf.BufferedReader, resPipeWr *buf.BufferedWriter, writeInterrupter common.Interruptible) *httpDiscardingConn {
 	return &httpDiscardingConn{
-		reqPipeRd: &buf.BufferedReader{Reader: reqPipeRd},
-		resPipeWr: resPipeWr,
-		readyCh:   make(chan struct{}),
+		reqPipeRd:    reqPipeRd,
+		resPipeWr:    resPipeWr,
+		resPipeInter: writeInterrupter,
+		readyCh:      make(chan struct{}),
 	}
 }
 
@@ -485,7 +478,7 @@ func (c *httpDiscardingConn) markReady(ok bool, err error) {
 func (c *httpDiscardingConn) Close() error {
 	c.reqPipeRd.Interrupt()
 	// TODO: this won't replace EOF if it's already closed
-	c.resPipeWr.CloseWithError(fmt.Errorf("Connection is closed"))
+	c.resPipeInter.Interrupt()
 	return nil
 }
 
